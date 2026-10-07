@@ -8,10 +8,11 @@ const dnsPromises = dns.promises;
 const net = require('node:net');
 const { URL } = require('node:url');
 
+// Configure reliable public DNS resolvers
 try {
   dns.setServers(['1.1.1.1', '8.8.8.8', '1.0.0.1']);
 } catch (e) {
-  // ignore if not permitted
+  // ignore if system limits prevent custom dns
 }
 
 const app = express();
@@ -51,16 +52,42 @@ function normalizeTarget(rawInput) {
   return {
     fullUrl: parsed.href,
     protocol: parsed.protocol,
-    hostname: parsed.hostname,
+    hostname: parsed.hostname.toLowerCase(),
     port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
     pathname: parsed.pathname || '/'
   };
 }
 
+// Helper to extract apex/organizational domain (e.g. www.google.com -> google.com, sub.domain.co.id -> domain.co.id)
+function getApexDomain(hostname) {
+  if (!hostname) return '';
+  const parts = hostname.toLowerCase().split('.');
+  if (parts.length <= 2) return hostname;
+
+  const multiPartTlds = [
+    'co.id', 'go.id', 'ac.id', 'mil.id', 'sch.id', 'or.id', 'net.id', 'biz.id', 'my.id',
+    'co.uk', 'org.uk', 'gov.uk', 'ac.uk', 'me.uk',
+    'com.au', 'net.au', 'org.au', 'edu.au', 'gov.au',
+    'co.jp', 'ne.jp', 'ac.jp', 'go.jp',
+    'com.br', 'gov.br', 'org.br',
+    'com.sg', 'edu.sg', 'gov.sg'
+  ];
+
+  const lastTwo = parts.slice(-2).join('.');
+  if (multiPartTlds.includes(lastTwo)) {
+    if (parts.length >= 3) {
+      return parts.slice(-3).join('.');
+    }
+    return hostname;
+  }
+
+  return parts.slice(-2).join('.');
+}
+
 // ==========================================
 // 1. SSL/TLS Certificate & Cipher Inspector
 // ==========================================
-function inspectTLS(hostname, port = 443, timeout = 7000) {
+function inspectTLS(hostname, port = 443, timeout = 7500) {
   return new Promise((resolve) => {
     const startTime = Date.now();
     let isResolved = false;
@@ -70,7 +97,7 @@ function inspectTLS(hostname, port = 443, timeout = 7000) {
         host: hostname,
         port: port,
         servername: hostname, // SNI support
-        rejectUnauthorized: false, // We want to inspect even self-signed / expired certs!
+        rejectUnauthorized: false, // We inspect even self-signed / expired certs
         timeout: timeout
       },
       () => {
@@ -89,7 +116,7 @@ function inspectTLS(hostname, port = 443, timeout = 7000) {
           return resolve({
             supported: true,
             hasCert: false,
-            error: 'No certificate returned by remote server'
+            error: 'Tidak ada sertifikat SSL/TLS yang dikembalikan oleh host target.'
           });
         }
 
@@ -139,7 +166,7 @@ function inspectTLS(hostname, port = 443, timeout = 7000) {
         socket.destroy();
         resolve({
           supported: false,
-          error: 'TLS handshake connection timed out (port ' + port + ' unreachable)'
+          error: `TLS handshake connection timed out (port ${port} tidak merespons)`
         });
       }
     });
@@ -209,12 +236,19 @@ function inspectHttpRedirect(hostname, timeout = 6000) {
 }
 
 // ==========================================
-// 3. HTTP Headers & Cookies Inspector
+// 3. HTTP Headers, Cookies & Redirect Follower
 // ==========================================
-function inspectHeadersAndCookies(targetUrl, timeout = 8000) {
+function fetchUrlHeadersWithRedirects(targetUrl, maxRedirects = 5, timeout = 7500, accumulatedCookies = [], redirectChain = []) {
   return new Promise((resolve) => {
-    const parsed = new URL(targetUrl);
+    let parsed;
+    try {
+      parsed = new URL(targetUrl);
+    } catch (e) {
+      return resolve({ error: 'Invalid URL: ' + targetUrl });
+    }
+
     const client = parsed.protocol === 'https:' ? https : http;
+    redirectChain.push({ url: targetUrl, protocol: parsed.protocol });
 
     const req = client.request(
       parsed,
@@ -231,9 +265,8 @@ function inspectHeadersAndCookies(targetUrl, timeout = 8000) {
       },
       (res) => {
         const rawHeaders = res.headers;
-        const cookies = [];
 
-        // Parse Set-Cookie header(s)
+        // Parse cookies from this hop
         const setCookie = rawHeaders['set-cookie'];
         if (setCookie) {
           const cookieStrings = Array.isArray(setCookie) ? setCookie : [setCookie];
@@ -251,7 +284,7 @@ function inspectHeadersAndCookies(targetUrl, timeout = 8000) {
               sameSite = sameSitePart.split('=')[1] || 'Unknown';
             }
 
-            cookies.push({
+            accumulatedCookies.push({
               name,
               secure: isSecure,
               httpOnly: isHttpOnly,
@@ -261,14 +294,30 @@ function inspectHeadersAndCookies(targetUrl, timeout = 8000) {
           });
         }
 
-        // Drain body without buffering large memory
+        // Check if redirect
+        const statusCode = res.statusCode;
+        const location = rawHeaders['location'];
+
+        if ([301, 302, 303, 307, 308].includes(statusCode) && location && maxRedirects > 0) {
+          res.resume();
+          try {
+            const nextUrl = new URL(location, targetUrl).href;
+            return resolve(fetchUrlHeadersWithRedirects(nextUrl, maxRedirects - 1, timeout, accumulatedCookies, redirectChain));
+          } catch (err) {
+            // fallback to current if invalid location
+          }
+        }
+
+        // Drain response
         res.on('data', () => {});
         res.on('end', () => {
           resolve({
             statusCode: res.statusCode,
             statusMessage: res.statusMessage,
+            finalUrl: targetUrl,
             headers: rawHeaders,
-            cookies: cookies
+            cookies: accumulatedCookies,
+            redirectChain
           });
         });
       }
@@ -276,7 +325,7 @@ function inspectHeadersAndCookies(targetUrl, timeout = 8000) {
 
     req.on('timeout', () => {
       req.destroy();
-      resolve({ error: 'Request timed out waiting for server headers' });
+      resolve({ error: 'Request timeout waiting for target server response.' });
     });
 
     req.on('error', (err) => {
@@ -287,17 +336,43 @@ function inspectHeadersAndCookies(targetUrl, timeout = 8000) {
   });
 }
 
+// Check RFC 9116 security.txt
+function checkSecurityTxt(hostname, timeout = 4000) {
+  return new Promise((resolve) => {
+    const req = https.request(
+      `https://${hostname}/.well-known/security.txt`,
+      {
+        method: 'HEAD',
+        headers: { 'User-Agent': 'CyberTrack-SecurityAudit/1.0' },
+        rejectUnauthorized: false,
+        timeout
+      },
+      (res) => {
+        res.resume();
+        resolve(res.statusCode === 200);
+      }
+    );
+    req.on('timeout', () => { req.destroy(); resolve(false); });
+    req.on('error', () => resolve(false));
+    req.end();
+  });
+}
+
 // ==========================================
-// 4. DNS, SPF & DMARC Inspector
+// 4. DNS, SPF & DMARC Inspector with Apex Fallback
 // ==========================================
 async function inspectDNS(hostname) {
+  const apexDomain = getApexDomain(hostname);
   const result = {
+    hostname,
+    apexDomain,
     ipAddresses: [],
-    spf: { present: false, record: null, status: 'MISSING' },
-    dmarc: { present: false, record: null, policy: 'MISSING', status: 'MISSING' },
+    spf: { present: false, record: null, status: 'MISSING', checkedDomain: hostname },
+    dmarc: { present: false, record: null, policy: 'MISSING', status: 'MISSING', checkedDomain: hostname },
     mxRecords: []
   };
 
+  // 1. IP Lookup
   try {
     const lookupResults = await dnsPromises.lookup(hostname, { all: true }).catch(() => []);
     result.ipAddresses = lookupResults.map((r) => r.address);
@@ -305,23 +380,38 @@ async function inspectDNS(hostname) {
     // ignore
   }
 
-  // MX records
+  // 2. MX Records (query hostname, fallback to apex)
   try {
-    const mx = await dnsPromises.resolveMx(hostname).catch(() => []);
+    let mx = await dnsPromises.resolveMx(hostname).catch(() => []);
+    if (mx.length === 0 && apexDomain !== hostname) {
+      mx = await dnsPromises.resolveMx(apexDomain).catch(() => []);
+    }
     result.mxRecords = mx;
   } catch (e) {
     // ignore
   }
 
-  // SPF Record check (TXT on root domain)
+  // 3. SPF Records (query hostname, fallback to apex if not found)
   try {
-    const txtRecords = await dnsPromises.resolveTxt(hostname).catch(() => []);
-    const flatTxt = txtRecords.map((chunk) => chunk.join(''));
-    const spfRecord = flatTxt.find((r) => r.startsWith('v=spf1'));
+    let spfRecord = null;
+    let checkedDomain = hostname;
+
+    const txtHost = await dnsPromises.resolveTxt(hostname).catch(() => []);
+    const flatHost = txtHost.map((c) => c.join(''));
+    spfRecord = flatHost.find((r) => r.startsWith('v=spf1'));
+
+    if (!spfRecord && apexDomain !== hostname) {
+      const txtApex = await dnsPromises.resolveTxt(apexDomain).catch(() => []);
+      const flatApex = txtApex.map((c) => c.join(''));
+      spfRecord = flatApex.find((r) => r.startsWith('v=spf1'));
+      if (spfRecord) checkedDomain = apexDomain;
+    }
 
     if (spfRecord) {
       result.spf.present = true;
       result.spf.record = spfRecord;
+      result.spf.checkedDomain = checkedDomain;
+
       if (spfRecord.includes('-all')) {
         result.spf.status = 'STRICT_HARDFAIL'; // Recommended
       } else if (spfRecord.includes('~all')) {
@@ -336,15 +426,26 @@ async function inspectDNS(hostname) {
     // ignore
   }
 
-  // DMARC Record check (TXT on _dmarc.hostname)
+  // 4. DMARC Records (RFC 7489: query _dmarc.hostname, fallback to _dmarc.apexDomain)
   try {
-    const dmarcRecords = await dnsPromises.resolveTxt(`_dmarc.${hostname}`).catch(() => []);
-    const flatDmarc = dmarcRecords.map((chunk) => chunk.join(''));
-    const dmarcRecord = flatDmarc.find((r) => r.startsWith('v=DMARC1'));
+    let dmarcRecord = null;
+    let checkedDomain = hostname;
+
+    const dmarcHost = await dnsPromises.resolveTxt(`_dmarc.${hostname}`).catch(() => []);
+    const flatDmarcHost = dmarcHost.map((c) => c.join(''));
+    dmarcRecord = flatDmarcHost.find((r) => r.startsWith('v=DMARC1'));
+
+    if (!dmarcRecord && apexDomain !== hostname) {
+      const dmarcApex = await dnsPromises.resolveTxt(`_dmarc.${apexDomain}`).catch(() => []);
+      const flatDmarcApex = dmarcApex.map((c) => c.join(''));
+      dmarcRecord = flatDmarcApex.find((r) => r.startsWith('v=DMARC1'));
+      if (dmarcRecord) checkedDomain = apexDomain;
+    }
 
     if (dmarcRecord) {
       result.dmarc.present = true;
       result.dmarc.record = dmarcRecord;
+      result.dmarc.checkedDomain = checkedDomain;
 
       const pMatch = dmarcRecord.match(/p=([a-zA-Z]+)/i);
       const policy = pMatch ? pMatch[1].toLowerCase() : 'unknown';
@@ -366,14 +467,13 @@ async function inspectDNS(hostname) {
 }
 
 // ==========================================
-// 5. Audit & Scoring Engine
+// 5. Complete Audit & Scoring Engine
 // ==========================================
-function evaluateSecurityPosture({ targetInfo, tlsResult, redirectResult, headersResult, dnsResult }) {
+function evaluateSecurityPosture({ targetInfo, tlsResult, redirectResult, headersResult, dnsResult, hasSecurityTxt }) {
   const findings = [];
   let score = 100;
   const headers = headersResult.headers || {};
 
-  // Helper to add finding
   function addFinding({ id, category, title, severity, penalty, passed, details, recommendation, owasp, snippets }) {
     if (!passed) {
       score = Math.max(0, score - penalty);
@@ -382,7 +482,7 @@ function evaluateSecurityPosture({ targetInfo, tlsResult, redirectResult, header
       id,
       category,
       title,
-      severity, // 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'PASS'
+      severity,
       penalty: passed ? 0 : penalty,
       passed,
       details,
@@ -397,7 +497,7 @@ function evaluateSecurityPosture({ targetInfo, tlsResult, redirectResult, header
     addFinding({
       id: 'tls-supported',
       category: 'Transport Security',
-      title: 'HTTPS & TLS Support',
+      title: 'HTTPS & TLS Support Tidak Aktif',
       severity: 'CRITICAL',
       penalty: 35,
       passed: false,
@@ -409,7 +509,22 @@ function evaluateSecurityPosture({ targetInfo, tlsResult, redirectResult, header
       }
     });
   } else {
-    // Certificate expiration check
+    // 1. Certificate Authenticity / Authorization check
+    if (!tlsResult.authorized) {
+      addFinding({
+        id: 'tls-untrusted',
+        category: 'Transport Security',
+        title: 'Sertifikat SSL/TLS Tidak Tepercaya / Invalid CA',
+        severity: 'CRITICAL',
+        penalty: 30,
+        passed: false,
+        details: `Sertifikat ditolak oleh verifikasi trust store: ${tlsResult.authError || 'Self-Signed / Untrusted CA'}. Browser pengunjung akan memblokir akses ke situs dengan layar merah.`,
+        recommendation: 'Ganti dengan sertifikat SSL/TLS resmi yang diterbitkan oleh Certificate Authority (CA) tepercaya.',
+        owasp: 'A02:2021 - Cryptographic Failures'
+      });
+    }
+
+    // 2. Expiration check
     if (tlsResult.isExpired) {
       addFinding({
         id: 'tls-expired',
@@ -418,7 +533,7 @@ function evaluateSecurityPosture({ targetInfo, tlsResult, redirectResult, header
         severity: 'CRITICAL',
         penalty: 30,
         passed: false,
-        details: `Sertifikat kedaluwarsa pada ${tlsResult.validTo}. Pengunjung akan disambut dengan peringatan merah bahaya keamanan browser.`,
+        details: `Sertifikat kedaluwarsa pada ${tlsResult.validTo}. Pengunjung akan disambut peringatan bahaya keamanan dari browser.`,
         recommendation: 'Segera perbarui sertifikat SSL/TLS domain Anda.',
         owasp: 'A02:2021 - Cryptographic Failures'
       });
@@ -431,29 +546,29 @@ function evaluateSecurityPosture({ targetInfo, tlsResult, redirectResult, header
         penalty: 8,
         passed: false,
         details: `Sertifikat akan kedaluwarsa dalam ${tlsResult.daysRemaining} hari (${tlsResult.validTo}).`,
-        recommendation: 'Periksa otomasi auto-renew sertifikat (misal cron certbot) sebelum kedaluwarsa.',
+        recommendation: 'Jalankan auto-renew sertifikat (misal: certbot renew) sebelum kedaluwarsa.',
         owasp: 'A02:2021 - Cryptographic Failures'
       });
-    } else {
+    } else if (tlsResult.authorized) {
       addFinding({
         id: 'tls-valid',
         category: 'Transport Security',
-        title: 'Sertifikat SSL/TLS Aktif & Valid',
+        title: 'Sertifikat SSL/TLS Aktif & Tepercaya',
         severity: 'PASS',
         penalty: 0,
         passed: true,
         details: `Sertifikat diterbitkan oleh ${tlsResult.issuer}, berlaku hingga ${tlsResult.validTo} (${tlsResult.daysRemaining} hari tersisa).`,
-        recommendation: 'Sertifikat dalam kondisi prima.',
+        recommendation: 'Sertifikat dalam kondisi prima dan valid.',
         owasp: 'A02:2021 - Cryptographic Failures'
       });
     }
 
-    // Protocol check
+    // 3. Protocol strength check
     if (tlsResult.protocolRating === 'DEPRECATED_VULNERABLE') {
       addFinding({
         id: 'tls-protocol',
         category: 'Transport Security',
-        title: 'Protokol TLS Usang & Rentan (' + tlsResult.protocol + ')',
+        title: `Protokol TLS Usang & Rentan (${tlsResult.protocol})`,
         severity: 'HIGH',
         penalty: 15,
         passed: false,
@@ -468,7 +583,7 @@ function evaluateSecurityPosture({ targetInfo, tlsResult, redirectResult, header
       addFinding({
         id: 'tls-protocol-modern',
         category: 'Transport Security',
-        title: 'Protokol Enkripsi Modern (' + tlsResult.protocol + ')',
+        title: `Protokol Enkripsi Modern (${tlsResult.protocol})`,
         severity: 'PASS',
         penalty: 0,
         passed: true,
@@ -501,8 +616,8 @@ function evaluateSecurityPosture({ targetInfo, tlsResult, redirectResult, header
         severity: 'HIGH',
         penalty: 15,
         passed: false,
-        details: `Permintaan ke http://${targetInfo.hostname} tidak otomatis diarahkan ke https:// (Status ${redirectResult.statusCode}). Data pengguna rentan disadap (Man-in-the-Middle) di jaringan publik/WiFi.`,
-        recommendation: 'Tambahkan aturan rewrite/redirect permanen (301) dari HTTP ke HTTPS.',
+        details: `Permintaan ke http://${targetInfo.hostname} tidak otomatis diarahkan ke https:// (Status ${redirectResult.statusCode}). Data pengguna rentan disadap (Man-in-the-Middle) di jaringan publik.`,
+        recommendation: 'Tambahkan aturan redirect permanen (301) dari HTTP ke HTTPS.',
         owasp: 'A02:2021 - Cryptographic Failures',
         snippets: {
           nginx: 'server {\n  listen 80;\n  server_name example.com;\n  return 301 https://$host$request_uri;\n}',
@@ -579,7 +694,7 @@ function evaluateSecurityPosture({ targetInfo, tlsResult, redirectResult, header
       addFinding({
         id: 'header-csp-loose',
         category: 'HTTP Security Headers',
-        title: 'CSP Aktif Namun Menggunakan Aturan Permisif',
+        title: 'CSP Menggunakan Aturan Permisif (unsafe-inline / unsafe-eval)',
         severity: 'MEDIUM',
         penalty: 7,
         passed: false,
@@ -608,7 +723,7 @@ function evaluateSecurityPosture({ targetInfo, tlsResult, redirectResult, header
       severity: 'HIGH',
       penalty: 14,
       passed: false,
-      details: 'Tidak ada CSP yang membatasi asal muasal resource (script, styles, images). Membuka celah fatal bagi serangan Cross-Site Scripting (XSS) dan Data Injection.',
+      details: 'Tidak ada CSP yang membatasi asal resource (script, styles, images). Membuka celah bagi serangan Cross-Site Scripting (XSS) dan Data Injection.',
       recommendation: 'Definisikan kebijakan CSP untuk membatasi eksekusi skrip pihak ketiga yang tidak tepercaya.',
       owasp: 'A03:2021 - Injection',
       snippets: {
@@ -625,7 +740,7 @@ function evaluateSecurityPosture({ targetInfo, tlsResult, redirectResult, header
     addFinding({
       id: 'header-xfo',
       category: 'HTTP Security Headers',
-      title: 'X-Frame-Options Aktif (' + xfo.toUpperCase() + ')',
+      title: `X-Frame-Options Aktif (${xfo.toUpperCase()})`,
       severity: 'PASS',
       penalty: 0,
       passed: true,
@@ -641,7 +756,7 @@ function evaluateSecurityPosture({ targetInfo, tlsResult, redirectResult, header
       severity: 'MEDIUM',
       penalty: 10,
       passed: false,
-      details: 'Halaman web dapat di-embed ke dalam iframe di situs asing milik penyerang untuk memanipulasi klik pengguna (Clickjacking).',
+      details: 'Halaman web dapat di-embed ke dalam iframe situs asing milik penyerang untuk memanipulasi klik pengguna (Clickjacking).',
       recommendation: 'Tambahkan header X-Frame-Options: DENY atau SAMEORIGIN.',
       owasp: 'A05:2021 - Security Misconfiguration',
       snippets: {
@@ -674,7 +789,7 @@ function evaluateSecurityPosture({ targetInfo, tlsResult, redirectResult, header
       severity: 'MEDIUM',
       penalty: 7,
       passed: false,
-      details: 'Tanpa nosniff, browser dapat mencoba menebak tipe konten secara mandiri dan berpotensi mengeksekusi file non-eksekutabel sebagai skrip jahat.',
+      details: 'Tanpa nosniff, browser dapat mencoba menebak tipe konten secara mandiri dan berpotensi mengeksekusi file berbahaya sebagai skrip.',
       recommendation: 'Tambahkan header X-Content-Type-Options: nosniff.',
       owasp: 'A05:2021 - Security Misconfiguration',
       snippets: {
@@ -690,7 +805,7 @@ function evaluateSecurityPosture({ targetInfo, tlsResult, redirectResult, header
     addFinding({
       id: 'header-referrer-policy',
       category: 'HTTP Security Headers',
-      title: 'Referrer-Policy Dikonfigurasi (' + refPol + ')',
+      title: `Referrer-Policy Dikonfigurasi (${refPol})`,
       severity: 'PASS',
       penalty: 0,
       passed: true,
@@ -746,10 +861,25 @@ function evaluateSecurityPosture({ targetInfo, tlsResult, redirectResult, header
     });
   }
 
+  // 7. Cross-Origin-Opener-Policy (COOP)
+  const coop = headers['cross-origin-opener-policy'];
+  if (coop) {
+    addFinding({
+      id: 'header-coop',
+      category: 'HTTP Security Headers',
+      title: `Cross-Origin-Opener-Policy (COOP) Aktif (${coop})`,
+      severity: 'PASS',
+      penalty: 0,
+      passed: true,
+      details: `Mengisolasi konteks browsing tingkat atas untuk mencegah serangan side-channel seperti Spectre.`,
+      recommendation: 'Isolasi origin aktif.',
+      owasp: 'A05:2021 - Security Misconfiguration'
+    });
+  }
+
   // --- D. Information Leakage & Fingerprinting ---
   const serverHeader = headers['server'];
   const xPoweredBy = headers['x-powered-by'];
-  const aspNetVersion = headers['x-aspnet-version'];
 
   if (xPoweredBy) {
     addFinding({
@@ -786,7 +916,7 @@ function evaluateSecurityPosture({ targetInfo, tlsResult, redirectResult, header
     addFinding({
       id: 'leak-server-version',
       category: 'Information Disclosure',
-      title: 'Versi Web Server Terbuka (' + serverHeader + ')',
+      title: `Versi Web Server Terbuka (${serverHeader})`,
       severity: 'LOW',
       penalty: 5,
       passed: false,
@@ -808,6 +938,21 @@ function evaluateSecurityPosture({ targetInfo, tlsResult, redirectResult, header
       passed: true,
       details: serverHeader ? `Header Server generik ("${serverHeader}") tanpa nomor versi rinci.` : 'Header Server tidak dikirimkan.',
       recommendation: 'Fingerprinting web server diminimalkan.',
+      owasp: 'A05:2021 - Security Misconfiguration'
+    });
+  }
+
+  // RFC 9116 security.txt
+  if (hasSecurityTxt) {
+    addFinding({
+      id: 'security-txt-present',
+      category: 'Information Disclosure',
+      title: 'RFC 9116 security.txt Ditemukan',
+      severity: 'PASS',
+      penalty: 0,
+      passed: true,
+      details: 'Situs menyediakan file /.well-known/security.txt untuk saluran pelaporan kerentanan keamanan yang bertanggung jawab.',
+      recommendation: 'Sangat baik, memenuhi standar pengungkapan kerentanan internasional.',
       owasp: 'A05:2021 - Security Misconfiguration'
     });
   }
@@ -848,7 +993,7 @@ function evaluateSecurityPosture({ targetInfo, tlsResult, redirectResult, header
         penalty: 8,
         passed: false,
         details: 'Cookie dapat diakses oleh JavaScript (document.cookie), berisiko dicuri penyerang saat terjadi serangan XSS (Session Hijacking).',
-        recommendation: 'Tambahkan flag HttpOnly untuk cookie sensitif atau session identifier.',
+        recommendation: 'Tambahkan flag HttpOnly untuk cookie sesi otentikasi.',
         owasp: 'A07:2021 - Identification and Authentication Failures'
       });
     }
@@ -876,7 +1021,7 @@ function evaluateSecurityPosture({ targetInfo, tlsResult, redirectResult, header
         penalty: 0,
         passed: true,
         details: `Semua ${cookies.length} cookie yang terdeteksi memiliki flag keamanan lengkap.`,
-        recommendation: 'Pengaturan cookie sesuai standar tertinggi.',
+        recommendation: 'Pengaturan cookie sesuai standar keamanan tertinggi.',
         owasp: 'A05:2021 - Security Misconfiguration'
       });
     }
@@ -892,7 +1037,7 @@ function evaluateSecurityPosture({ targetInfo, tlsResult, redirectResult, header
         severity: 'MEDIUM',
         penalty: 8,
         passed: false,
-        details: `SPF ditemukan (${dnsResult.spf.record}) namun menggunakan mekanisme netral atau izinkan semua, sehingga domain masih mudah dipalsukan untuk phising.`,
+        details: `SPF ditemukan pada ${dnsResult.spf.checkedDomain} ("${dnsResult.spf.record}") namun menggunakan mekanisme netral/izinkan semua, sehingga domain masih mudah dipalsukan untuk phising.`,
         recommendation: 'Ganti aturan penutup SPF dengan ~all (SoftFail) atau -all (HardFail).',
         owasp: 'A05:2021 - Security Misconfiguration'
       });
@@ -900,11 +1045,11 @@ function evaluateSecurityPosture({ targetInfo, tlsResult, redirectResult, header
       addFinding({
         id: 'dns-spf-good',
         category: 'DNS & Email Posture',
-        title: 'SPF Record Dikonfigurasi (' + dnsResult.spf.status + ')',
+        title: `SPF Record Dikonfigurasi (${dnsResult.spf.status})`,
         severity: 'PASS',
         penalty: 0,
         passed: true,
-        details: `SPF aktif: "${dnsResult.spf.record}". Memverifikasi server pengirim email resmi.`,
+        details: `SPF aktif pada ${dnsResult.spf.checkedDomain}: "${dnsResult.spf.record}". Memverifikasi server pengirim email resmi.`,
         recommendation: 'Proteksi SPF aktif.',
         owasp: 'A05:2021 - Security Misconfiguration'
       });
@@ -917,7 +1062,7 @@ function evaluateSecurityPosture({ targetInfo, tlsResult, redirectResult, header
       severity: 'HIGH',
       penalty: 10,
       passed: false,
-      details: 'Domain aktif mengirim/menerima email tetapi tidak memiliki record TXT SPF. Penipu dapat memalsukan alamat email domain Anda dengan mudah (Email Spoofing).',
+      details: `Domain (${dnsResult.apexDomain}) aktif memiliki catatan MX tetapi tidak memiliki record TXT SPF. Penipu dapat memalsukan alamat email domain Anda dengan mudah (Email Spoofing).`,
       recommendation: 'Tambahkan TXT record SPF pada DNS manajemen domain Anda.',
       owasp: 'A05:2021 - Security Misconfiguration'
     });
@@ -932,7 +1077,7 @@ function evaluateSecurityPosture({ targetInfo, tlsResult, redirectResult, header
         severity: 'LOW',
         penalty: 4,
         passed: false,
-        details: `DMARC aktif dengan p=none ("${dnsResult.dmarc.record}"). Email palsu yang gagal lolos tidak ditolak, hanya dipantau.`,
+        details: `DMARC aktif pada ${dnsResult.dmarc.checkedDomain} dengan p=none ("${dnsResult.dmarc.record}"). Email palsu yang gagal lolos tidak ditolak, hanya dipantau.`,
         recommendation: 'Tingkatkan kebijakan DMARC ke p=quarantine atau p=reject setelah selesai verifikasi pengirim sah.',
         owasp: 'A05:2021 - Security Misconfiguration'
       });
@@ -940,11 +1085,11 @@ function evaluateSecurityPosture({ targetInfo, tlsResult, redirectResult, header
       addFinding({
         id: 'dns-dmarc-good',
         category: 'DNS & Email Posture',
-        title: 'DMARC Enforcement Aktif (p=' + dnsResult.dmarc.policy + ')',
+        title: `DMARC Enforcement Aktif (p=${dnsResult.dmarc.policy})`,
         severity: 'PASS',
         penalty: 0,
         passed: true,
-        details: `DMARC diterapkan secara tegas: "${dnsResult.dmarc.record}". Melindungi reputasi domain dari phising massal.`,
+        details: `DMARC diterapkan secara tegas pada ${dnsResult.dmarc.checkedDomain}: "${dnsResult.dmarc.record}". Melindungi reputasi domain dari phising massal.`,
         recommendation: 'Proteksi anti-spoofing DMARC sangat baik.',
         owasp: 'A05:2021 - Security Misconfiguration'
       });
@@ -957,7 +1102,7 @@ function evaluateSecurityPosture({ targetInfo, tlsResult, redirectResult, header
       severity: 'MEDIUM',
       penalty: 8,
       passed: false,
-      details: 'Tidak ada proteksi DMARC pada _dmarc.' + targetInfo.hostname + '. Server penerima email tidak memiliki panduan tindakan ketika menerima email palsu dari domain ini.',
+      details: `Tidak ada proteksi DMARC pada _dmarc.${dnsResult.apexDomain}. Server penerima email tidak memiliki panduan tindakan ketika menerima email palsu dari domain ini.`,
       recommendation: 'Tambahkan TXT record DMARC dengan kebijakan p=quarantine atau p=reject.',
       owasp: 'A05:2021 - Security Misconfiguration'
     });
@@ -1030,18 +1175,19 @@ app.post('/api/scan', async (req, res) => {
       }
     }
   } catch (e) {
-    // dns resolution might fail if domain doesn't exist
+    // dns lookup may fail if host does not exist
   }
 
   const startTime = Date.now();
 
   try {
-    // Run all non-intrusive scans in parallel
-    const [tlsResult, redirectResult, headersResult, dnsResult] = await Promise.all([
+    // Run all live non-intrusive network scans in parallel
+    const [tlsResult, redirectResult, headersResult, dnsResult, hasSecurityTxt] = await Promise.all([
       inspectTLS(targetInfo.hostname, 443),
       inspectHttpRedirect(targetInfo.hostname),
-      inspectHeadersAndCookies(targetInfo.fullUrl),
-      inspectDNS(targetInfo.hostname)
+      fetchUrlHeadersWithRedirects(targetInfo.fullUrl),
+      inspectDNS(targetInfo.hostname),
+      checkSecurityTxt(targetInfo.hostname)
     ]);
 
     if (!tlsResult.supported && !redirectResult.httpAvailable && headersResult.error) {
@@ -1056,7 +1202,8 @@ app.post('/api/scan', async (req, res) => {
       tlsResult,
       redirectResult,
       headersResult,
-      dnsResult
+      dnsResult,
+      hasSecurityTxt
     });
 
     const executionTimeMs = Date.now() - startTime;
@@ -1066,7 +1213,9 @@ app.post('/api/scan', async (req, res) => {
       target: {
         raw: rawUrl,
         normalized: targetInfo.fullUrl,
+        finalLandingUrl: headersResult.finalUrl || targetInfo.fullUrl,
         hostname: targetInfo.hostname,
+        apexDomain: dnsResult.apexDomain,
         port: targetInfo.port,
         protocol: targetInfo.protocol,
         scanTimestamp: new Date().toISOString(),
@@ -1078,7 +1227,9 @@ app.post('/api/scan', async (req, res) => {
         redirect: redirectResult,
         headers: headersResult.headers || {},
         cookies: headersResult.cookies || [],
-        dns: dnsResult
+        dns: dnsResult,
+        redirectChain: headersResult.redirectChain || [],
+        hasSecurityTxt
       }
     });
   } catch (error) {
