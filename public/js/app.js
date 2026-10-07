@@ -157,42 +157,24 @@ ENGINE: CyberTrack RFC-Compliant Security Posture Auditor`;
   }
 
   // ==========================================
-  // Terminal Log Streaming Helper
+  // Scan progress: list the checks being run.
+  // The server answers in a single response, so we don't fake per-step timing.
   // ==========================================
+  const SCAN_CHECKS = [
+    'Resolusi DNS (A/AAAA)',
+    'Koneksi TLS port 443 & sertifikat',
+    'Redirect HTTP → HTTPS (port 80)',
+    'Header keamanan HTTP (CSP, HSTS, XFO, dll.)',
+    'Atribut cookie (Secure, HttpOnly, SameSite)',
+    'Rekaman SPF & DMARC',
+    'security.txt (RFC 9116)',
+    'Kebocoran informasi server'
+  ];
+
   function streamTerminalLogs(target) {
-    terminalLogs.innerHTML = '';
-    terminalTimeouts.forEach(clearTimeout);
-    terminalTimeouts = [];
-
-    const startTime = Date.now();
-    const steps = [
-      { tag: 'RESOLVER', msg: `Querying A/AAAA records for ${target} via 1.1.1.1 / 8.8.8.8...` },
-      { tag: 'SOCKET',   msg: `Initializing raw TLS connection on port 443 with SNI hostname...` },
-      { tag: 'X509',     msg: `Inspecting certificate chain, CA authority, cipher suite and expiry...` },
-      { tag: 'ROUTING',  msg: `Testing Port 80 HTTP enforcement and checking 301/308 redirect chain...` },
-      { tag: 'HEADERS',  msg: `Auditing HTTP Security Headers (CSP, HSTS, XFO, XCTO, Referrer, COOP)...` },
-      { tag: 'COOKIES',  msg: `Evaluating Set-Cookie flag matrix (Secure, HttpOnly, SameSite)...` },
-      { tag: 'DNS-SEC',  msg: `Validating SPF (v=spf1) & DMARC (_dmarc) email anti-spoofing policies...` },
-      { tag: 'RFC-9116', msg: `Querying /.well-known/security.txt vulnerability disclosure policy...` },
-      { tag: 'EVALUATE', msg: `Synthesizing OWASP Top 10 telemetry and computing security score...` }
-    ];
-
-    steps.forEach((step, idx) => {
-      const delay = idx * 110;
-      const t = setTimeout(() => {
-        const elapsed = ((Date.now() - startTime) / 1000).toFixed(3);
-        const line = document.createElement('div');
-        line.className = 'log-line';
-        line.innerHTML = `
-          <span class="log-ts">[+${elapsed}s]</span>
-          <span class="log-tag">[${step.tag}]</span>
-          <span class="log-msg">${step.msg}</span>
-        `;
-        terminalLogs.appendChild(line);
-        terminalLogs.scrollTop = terminalLogs.scrollHeight;
-      }, delay);
-      terminalTimeouts.push(t);
-    });
+    const label = document.getElementById('scanTargetLabel');
+    if (label) label.textContent = target;
+    terminalLogs.innerHTML = SCAN_CHECKS.map((c) => `<li>${escapeHtml(c)}</li>`).join('');
   }
 
   // ==========================================
@@ -254,11 +236,11 @@ ENGINE: CyberTrack RFC-Compliant Security Posture Auditor`;
     renderGradeBadge(evaluation.grade);
 
     // 3. Severity Distribution
-    critCountEl.textContent = `${evaluation.stats.critical} CRIT`;
-    highCountEl.textContent = `${evaluation.stats.high} HIGH`;
-    medCountEl.textContent = `${evaluation.stats.medium} MED`;
-    lowCountEl.textContent = `${evaluation.stats.low} LOW`;
-    passCountEl.textContent = `${evaluation.stats.passed} PASS`;
+    critCountEl.textContent = evaluation.stats.critical;
+    highCountEl.textContent = evaluation.stats.high;
+    medCountEl.textContent = evaluation.stats.medium;
+    lowCountEl.textContent = evaluation.stats.low;
+    passCountEl.textContent = evaluation.stats.passed;
 
     // 4. Diagnostic Sidebar
     renderDiagnosticsSidebar(rawScanData);
@@ -269,12 +251,12 @@ ENGINE: CyberTrack RFC-Compliant Security Posture Auditor`;
 
   function animateScoreDisplay(score) {
     meterScoreNum.textContent = '0';
-    let barColor = 'var(--cyan)';
-    if (score >= 85) barColor = 'var(--green)';
-    else if (score >= 70) barColor = 'var(--cyan)';
-    else if (score >= 50) barColor = 'var(--amber)';
-    else if (score >= 35) barColor = 'var(--orange)';
-    else barColor = 'var(--red)';
+    let barColor;
+    if (score >= 85) barColor = 'var(--sev-pass)';
+    else if (score >= 70) barColor = 'var(--sev-low)';
+    else if (score >= 50) barColor = 'var(--sev-medium)';
+    else if (score >= 35) barColor = 'var(--sev-high)';
+    else barColor = 'var(--sev-critical)';
 
     hudScoreBar.style.background = barColor;
     hudScoreBar.style.width = `${score}%`;
@@ -293,8 +275,9 @@ ENGINE: CyberTrack RFC-Compliant Security Posture Auditor`;
   }
 
   function renderGradeBadge(grade) {
-    gradeBadge.textContent = `GRADE ${grade}`;
-    gradeBadge.className = 'grade-stamp';
+    gradeBadge.textContent = grade;
+    gradeBadge.title = `Grade ${grade}`;
+    gradeBadge.className = 'grade';
     if (grade === 'A+' || grade === 'A') gradeBadge.classList.add('grade-A');
     else if (grade === 'B') gradeBadge.classList.add('grade-B');
     else if (grade === 'C') gradeBadge.classList.add('grade-C');
@@ -307,10 +290,10 @@ ENGINE: CyberTrack RFC-Compliant Security Posture Auditor`;
     if (tls.supported) {
       sslCertIssuer.textContent = tls.issuer;
       sslCertValidity.textContent = `${new Date(tls.validFrom).toLocaleDateString()} - ${new Date(tls.validTo).toLocaleDateString()}`;
-      sslCertDays.textContent = tls.isExpired ? 'EXPIRED' : `${tls.daysRemaining} days`;
+      sslCertDays.textContent = tls.isExpired ? 'Kedaluwarsa' : `${tls.daysRemaining} hari`;
       sslCipherSuite.textContent = `${tls.protocol} (${tls.cipher})`;
     } else {
-      sslCertIssuer.textContent = 'NO TLS / PORT 443 CLOSED';
+      sslCertIssuer.textContent = 'Tidak ada TLS / port 443 tertutup';
       sslCertValidity.textContent = 'N/A';
       sslCertDays.textContent = 'N/A';
       sslCipherSuite.textContent = 'N/A';
@@ -320,25 +303,25 @@ ENGINE: CyberTrack RFC-Compliant Security Posture Auditor`;
     if (raw.dns.spf.present) {
       dnsSpfVal.textContent = `${raw.dns.spf.status} (${raw.dns.spf.checkedDomain})`;
     } else {
-      dnsSpfVal.textContent = 'NOT CONFIGURED';
+      dnsSpfVal.textContent = 'Tidak dikonfigurasi';
     }
 
     if (raw.dns.dmarc.present) {
       dnsDmarcVal.textContent = `p=${raw.dns.dmarc.policy} (${raw.dns.dmarc.checkedDomain})`;
     } else {
-      dnsDmarcVal.textContent = 'NOT CONFIGURED';
+      dnsDmarcVal.textContent = 'Tidak dikonfigurasi';
     }
 
     // HTTP Redirect
     if (raw.redirect.httpAvailable) {
-      httpRedirectVal.textContent = raw.redirect.redirectsToHttps ? `301 ENFORCED` : `NO REDIRECT (INSECURE)`;
+      httpRedirectVal.textContent = raw.redirect.redirectsToHttps ? 'Ya, ke HTTPS' : 'Tidak (tidak aman)';
     } else {
-      httpRedirectVal.textContent = 'PORT 80 REFUSED';
+      httpRedirectVal.textContent = 'Port 80 menolak koneksi';
     }
 
     // Server Leak
-    const srv = raw.headers['server'] || 'SUPPRESSED (SECURE)';
-    const pow = raw.headers['x-powered-by'] ? ` / Powered: ${raw.headers['x-powered-by']}` : '';
+    const srv = raw.headers['server'] || 'Disembunyikan';
+    const pow = raw.headers['x-powered-by'] ? ` / X-Powered-By: ${raw.headers['x-powered-by']}` : '';
     serverHeaderVal.textContent = srv + pow;
   }
 
@@ -365,13 +348,12 @@ ENGINE: CyberTrack RFC-Compliant Security Posture Auditor`;
     });
 
     if (filtered.length === 0) {
-      findingsContainer.innerHTML = `
-        <div style="padding: 2.5rem; text-align: center; background: var(--bg-surface); border: 1px dashed var(--border-hairline); border-radius: var(--radius-sm); color: var(--text-tertiary); font-family: var(--font-mono); font-size: 0.85rem;">
-          [NO AUDIT FINDINGS MATCH CURRENT FILTER CRITERIA]
-        </div>
-      `;
+      findingsContainer.innerHTML = `<div class="empty-state">Tidak ada temuan untuk filter ini.</div>`;
       return;
     }
+
+    const SEV_ORDER = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3, PASS: 5 };
+    filtered.sort((a, b) => (SEV_ORDER[a.severity] ?? 4) - (SEV_ORDER[b.severity] ?? 4));
 
     filtered.forEach((f) => {
       const card = createFindingRow(f);
@@ -380,15 +362,19 @@ ENGINE: CyberTrack RFC-Compliant Security Posture Auditor`;
   }
 
   function createFindingRow(f) {
-    const row = document.createElement('div');
-    row.className = `finding-row sev-${f.severity.toLowerCase()}`;
+    const SEV_LABELS = {
+      CRITICAL: 'Kritis',
+      HIGH: 'Tinggi',
+      MEDIUM: 'Sedang',
+      LOW: 'Rendah',
+      PASS: 'Lolos'
+    };
+    const sevKey = (f.severity || 'INFO').toUpperCase();
+    const sevClass = SEV_LABELS[sevKey] ? sevKey.toLowerCase() : 'info';
+    const sevText = SEV_LABELS[sevKey] || 'Info';
 
-    let sevColor = 'var(--text-tertiary)';
-    if (f.severity === 'CRITICAL') sevColor = 'var(--red)';
-    else if (f.severity === 'HIGH') sevColor = 'var(--orange)';
-    else if (f.severity === 'MEDIUM') sevColor = 'var(--amber)';
-    else if (f.severity === 'LOW') sevColor = 'var(--cyan)';
-    else if (f.severity === 'PASS') sevColor = 'var(--green)';
+    const row = document.createElement('article');
+    row.className = `finding sev-${sevClass}`;
 
     let snippetsHtml = '';
     if (f.snippets && Object.keys(f.snippets).length > 0) {
@@ -397,45 +383,35 @@ ENGINE: CyberTrack RFC-Compliant Security Posture Auditor`;
       snippetsHtml = `
         <div class="code-box">
           <div class="code-box-header">
-            <span>CONFIG PLAYBOOK // ${firstKey.toUpperCase()}</span>
-            <button type="button" class="btn-copy-code" data-code="${encodeURIComponent(f.snippets[firstKey])}">
-              <svg style="width: 12px; height: 12px;" viewBox="0 0 24 24"><path fill="currentColor" d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>
-              COPY
-            </button>
+            <span>${escapeHtml(firstKey)}</span>
+            <button type="button" class="btn-copy-code" data-code="${encodeURIComponent(f.snippets[firstKey])}">Salin</button>
           </div>
           <pre>${code}</pre>
         </div>
       `;
     }
 
+    const meta = [f.category, f.owasp].filter(Boolean).join(' · ');
+
     row.innerHTML = `
-      <div class="finding-meta-top">
-        <span class="badge-tag" style="background: ${sevColor}15; color: ${sevColor}; border: 1px solid ${sevColor}40;">
-          [${f.severity}]
-        </span>
-        <span class="badge-tag badge-cat">${f.category}</span>
-        ${f.owasp ? `<span class="badge-tag badge-owasp">${f.owasp}</span>` : ''}
-        ${f.penalty > 0 ? `<span class="penalty-tag">-${f.penalty} PTS</span>` : ''}
-      </div>
-
-      <div class="finding-title">${f.title}</div>
-      <div class="finding-desc">${f.details}</div>
-
-      ${!f.passed ? `
-        <div class="remediation-panel">
-          <div class="remediation-label">
-            <svg style="width: 12px; height: 12px;" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg>
-            <span>REMEDIATION PROTOCOL:</span>
+      <div><span class="sev-label">${sevText}</span></div>
+      <div>
+        <div class="finding-head">
+          <h3 class="finding-title">${f.title}</h3>
+          ${f.penalty > 0 ? `<span class="finding-penalty">−${f.penalty} poin</span>` : ''}
+        </div>
+        <div class="finding-meta">${meta}</div>
+        <p class="finding-desc">${f.details}</p>
+        ${!f.passed ? `
+          <div class="fix">
+            <div class="fix-label">Perbaikan</div>
+            <p class="fix-text">${f.recommendation}</p>
+            ${snippetsHtml}
           </div>
-          <div class="remediation-text">${f.recommendation}</div>
-          ${snippetsHtml}
-        </div>
-      ` : `
-        <div class="passed-line">
-          <svg viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
-          <span>${f.recommendation}</span>
-        </div>
-      `}
+        ` : `
+          <p class="passed-note">${f.recommendation}</p>
+        `}
+      </div>
     `;
 
     // Bind snippet copy buttons
@@ -478,16 +454,17 @@ ENGINE: CyberTrack RFC-Compliant Security Posture Auditor`;
     historyChipsContainer.innerHTML = '';
 
     if (history.length === 0) {
-      historyChipsContainer.innerHTML = `<span style="font-size: 0.75rem; color: var(--text-dimmed); font-family: var(--font-mono);">No audit history</span>`;
+      historyChipsContainer.innerHTML = `<span class="history-empty">Belum ada</span>`;
       return;
     }
 
     history.forEach((h) => {
-      const chip = document.createElement('div');
+      const chip = document.createElement('button');
+      chip.type = 'button';
       chip.className = 'history-item';
       chip.innerHTML = `
-        <span>${h.hostname}</span>
-        <span class="history-grade grade-${h.grade.replace('+', '-plus')}">[${h.grade}]</span>
+        <span>${escapeHtml(h.hostname)}</span>
+        <span class="history-grade">${escapeHtml(h.grade)}</span>
       `;
       chip.addEventListener('click', () => {
         targetInput.value = h.hostname;
