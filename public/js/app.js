@@ -1,6 +1,6 @@
 /**
- * CyberTrack - Cyber Security Posture & Vulnerability Scanner
- * Frontend Client Application
+ * CyberTrack - Enterprise Cyber Security Posture & Vulnerability Scanner
+ * Security Command Center Client Controller
  */
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -11,15 +11,14 @@ document.addEventListener('DOMContentLoaded', () => {
   const presetChips = document.querySelectorAll('.preset-chip');
 
   const scanningState = document.getElementById('scanningState');
-  const scanPhaseText = document.getElementById('scanPhaseText');
-  const scanDomainDisplay = document.getElementById('scanDomainDisplay');
+  const terminalLogs = document.getElementById('terminalLogs');
 
   const errorBanner = document.getElementById('errorBanner');
   const errorMessage = document.getElementById('errorMessage');
 
   const resultsSection = document.getElementById('resultsSection');
-  const meterFill = document.getElementById('meterFill');
   const meterScoreNum = document.getElementById('meterScoreNum');
+  const hudScoreBar = document.getElementById('hudScoreBar');
   const gradeBadge = document.getElementById('gradeBadge');
   const targetDomainDisplay = document.getElementById('targetDomainDisplay');
   const ipAddressDisplay = document.getElementById('ipAddressDisplay');
@@ -33,17 +32,17 @@ document.addEventListener('DOMContentLoaded', () => {
   const lowCountEl = document.getElementById('lowCount');
   const passCountEl = document.getElementById('passCount');
 
-  // Findings list and filters
+  // Findings list & filters
   const findingsContainer = document.getElementById('findingsContainer');
-  const categoryTabs = document.querySelectorAll('.tab-btn');
+  const categoryChips = document.querySelectorAll('.cat-chip');
   const severityFilter = document.getElementById('severityFilter');
 
-  // Action buttons
+  // Actions
   const printReportBtn = document.getElementById('printReportBtn');
   const downloadJsonBtn = document.getElementById('downloadJsonBtn');
   const copySummaryBtn = document.getElementById('copySummaryBtn');
 
-  // Tech details
+  // Diagnostic sidebar
   const sslCertIssuer = document.getElementById('sslCertIssuer');
   const sslCertValidity = document.getElementById('sslCertValidity');
   const sslCertDays = document.getElementById('sslCertDays');
@@ -53,7 +52,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const httpRedirectVal = document.getElementById('httpRedirectVal');
   const serverHeaderVal = document.getElementById('serverHeaderVal');
 
-  // History container
+  // History & Toast
   const historyChipsContainer = document.getElementById('historyChipsContainer');
   const clearHistoryBtn = document.getElementById('clearHistoryBtn');
   const toastMsg = document.getElementById('toastMsg');
@@ -62,20 +61,9 @@ document.addEventListener('DOMContentLoaded', () => {
   let currentScanData = null;
   let activeCategory = 'all';
   let activeSeverityFilter = 'all';
+  let terminalTimeouts = [];
 
-  // Scanning phases messages
-  const phaseMessages = [
-    'Menghubungi DNS & memverifikasi IP publik...',
-    'Menjalankan TLS handshake & verifikasi sertifikat X.509...',
-    'Memeriksa pemaksaan redirect HTTP -> HTTPS...',
-    'Menganalisis HTTP Security Headers (CSP, HSTS, XFO, XCTO)...',
-    'Menguji atribut keamanan cookie (Secure, HttpOnly, SameSite)...',
-    'Memeriksa catatan reputasi domain DNS (SPF & DMARC)...',
-    'Menghitung skor postur keamanan & memetakan OWASP Top 10...'
-  ];
-  let phaseInterval = null;
-
-  // Initialize History
+  // Initialize
   loadHistory();
 
   // Preset click
@@ -98,17 +86,17 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // Category filter tabs
-  categoryTabs.forEach((tab) => {
-    tab.addEventListener('click', () => {
-      categoryTabs.forEach((t) => t.classList.remove('active'));
-      tab.classList.add('active');
-      activeCategory = tab.getAttribute('data-category');
+  // Category filter chips
+  categoryChips.forEach((chip) => {
+    chip.addEventListener('click', () => {
+      categoryChips.forEach((c) => c.classList.remove('active'));
+      chip.classList.add('active');
+      activeCategory = chip.getAttribute('data-category');
       renderFindings();
     });
   });
 
-  // Severity dropdown filter
+  // Severity dropdown
   if (severityFilter) {
     severityFilter.addEventListener('change', (e) => {
       activeSeverityFilter = e.target.value;
@@ -116,7 +104,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  // Export & Action Handlers
+  // Export handlers
   if (printReportBtn) {
     printReportBtn.addEventListener('click', () => {
       window.print();
@@ -129,11 +117,11 @@ document.addEventListener('DOMContentLoaded', () => {
       const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(currentScanData, null, 2));
       const downloadAnchor = document.createElement('a');
       downloadAnchor.setAttribute('href', dataStr);
-      downloadAnchor.setAttribute('download', `cybertrack-report-${currentScanData.target.hostname}.json`);
+      downloadAnchor.setAttribute('download', `cybertrack-audit-${currentScanData.target.hostname}.json`);
       document.body.appendChild(downloadAnchor);
       downloadAnchor.click();
       downloadAnchor.remove();
-      showToast('Laporan JSON berhasil diunduh!');
+      showToast('Raw telemetry JSON exported');
     });
   }
 
@@ -142,20 +130,20 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!currentScanData) return;
       const t = currentScanData.target;
       const e = currentScanData.evaluation;
-      const summaryText = `[CyberTrack Security Audit Report]
-Target: ${t.hostname} (${t.normalized})
-Skor: ${e.score}/100 (Grade: ${e.grade})
-Status Masalah:
-- Critical: ${e.stats.critical}
-- High: ${e.stats.high}
-- Medium: ${e.stats.medium}
-- Low: ${e.stats.low}
-- Checks Passed: ${e.stats.passed}
-Waktu Audit: ${new Date(t.scanTimestamp).toLocaleString()}
-Dianalisis menggunakan CyberTrack Passive Security Scanner.`;
+      const summaryText = `[CYBERTRACK SECURITY AUDIT REPORT]
+TARGET: ${t.hostname} (${t.normalized})
+POSTURE SCORE: ${e.score}/100 (GRADE: ${e.grade})
+RISK DISTRIBUTION:
+  [!] CRITICAL: ${e.stats.critical}
+  [!] HIGH:     ${e.stats.high}
+  [-] MEDIUM:   ${e.stats.medium}
+  [-] LOW:      ${e.stats.low}
+  [+] PASSED:   ${e.stats.passed}
+AUDIT TIME: ${new Date(t.scanTimestamp).toISOString()}
+ENGINE: CyberTrack RFC-Compliant Security Posture Auditor`;
 
       navigator.clipboard.writeText(summaryText).then(() => {
-        showToast('Ringkasan berhasil disalin ke clipboard!');
+        showToast('Summary copied to clipboard');
       });
     });
   }
@@ -164,32 +152,59 @@ Dianalisis menggunakan CyberTrack Passive Security Scanner.`;
     clearHistoryBtn.addEventListener('click', () => {
       localStorage.removeItem('cybertrack_history');
       loadHistory();
-      showToast('Riwayat pemindaian dibersihkan.');
+      showToast('Audit history cleared');
     });
   }
 
   // ==========================================
-  // Perform Security Scan
+  // Terminal Log Streaming Helper
+  // ==========================================
+  function streamTerminalLogs(target) {
+    terminalLogs.innerHTML = '';
+    terminalTimeouts.forEach(clearTimeout);
+    terminalTimeouts = [];
+
+    const startTime = Date.now();
+    const steps = [
+      { tag: 'RESOLVER', msg: `Querying A/AAAA records for ${target} via 1.1.1.1 / 8.8.8.8...` },
+      { tag: 'SOCKET',   msg: `Initializing raw TLS connection on port 443 with SNI hostname...` },
+      { tag: 'X509',     msg: `Inspecting certificate chain, CA authority, cipher suite and expiry...` },
+      { tag: 'ROUTING',  msg: `Testing Port 80 HTTP enforcement and checking 301/308 redirect chain...` },
+      { tag: 'HEADERS',  msg: `Auditing HTTP Security Headers (CSP, HSTS, XFO, XCTO, Referrer, COOP)...` },
+      { tag: 'COOKIES',  msg: `Evaluating Set-Cookie flag matrix (Secure, HttpOnly, SameSite)...` },
+      { tag: 'DNS-SEC',  msg: `Validating SPF (v=spf1) & DMARC (_dmarc) email anti-spoofing policies...` },
+      { tag: 'RFC-9116', msg: `Querying /.well-known/security.txt vulnerability disclosure policy...` },
+      { tag: 'EVALUATE', msg: `Synthesizing OWASP Top 10 telemetry and computing security score...` }
+    ];
+
+    steps.forEach((step, idx) => {
+      const delay = idx * 110;
+      const t = setTimeout(() => {
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(3);
+        const line = document.createElement('div');
+        line.className = 'log-line';
+        line.innerHTML = `
+          <span class="log-ts">[+${elapsed}s]</span>
+          <span class="log-tag">[${step.tag}]</span>
+          <span class="log-msg">${step.msg}</span>
+        `;
+        terminalLogs.appendChild(line);
+        terminalLogs.scrollTop = terminalLogs.scrollHeight;
+      }, delay);
+      terminalTimeouts.push(t);
+    });
+  }
+
+  // ==========================================
+  // Execute Security Scan
   // ==========================================
   async function performScan(target) {
-    // Reset states
     hideError();
     resultsSection.style.display = 'none';
     scanningState.style.display = 'block';
     startScanBtn.disabled = true;
 
-    scanDomainDisplay.textContent = target;
-
-    // Start animated status text
-    let phaseIdx = 0;
-    scanPhaseText.textContent = phaseMessages[phaseIdx];
-    clearInterval(phaseInterval);
-    phaseInterval = setInterval(() => {
-      phaseIdx = (phaseIdx + 1) % phaseMessages.length;
-      scanPhaseText.textContent = phaseMessages[phaseIdx];
-    }, 900);
-
-    // Scroll to loading area
+    streamTerminalLogs(target);
     scanningState.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 
     try {
@@ -200,21 +215,21 @@ Dianalisis menggunakan CyberTrack Passive Security Scanner.`;
       });
 
       const data = await response.json();
-      clearInterval(phaseInterval);
 
       if (!response.ok || !data.success) {
-        throw new Error(data.error || 'Gagal melakukan pemindaian keamanan target.');
+        throw new Error(data.error || 'Failed to establish connection to target.');
       }
 
       currentScanData = data;
       saveToHistory(data);
       renderResults(data);
 
-      scanningState.style.display = 'none';
-      resultsSection.style.display = 'block';
-      resultsSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      setTimeout(() => {
+        scanningState.style.display = 'none';
+        resultsSection.style.display = 'block';
+        resultsSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 350);
     } catch (err) {
-      clearInterval(phaseInterval);
       scanningState.style.display = 'none';
       showError(err.message);
     } finally {
@@ -228,50 +243,44 @@ Dianalisis menggunakan CyberTrack Passive Security Scanner.`;
   function renderResults(data) {
     const { target, evaluation, rawScanData } = data;
 
-    // 1. Target Details
+    // 1. Target Metadata
     targetDomainDisplay.textContent = target.hostname;
-    ipAddressDisplay.textContent = rawScanData.dns.ipAddresses[0] || 'Tidak terdeteksi';
+    ipAddressDisplay.textContent = rawScanData.dns.ipAddresses[0] || 'Unresolved';
     tlsVersionDisplay.textContent = rawScanData.tls.protocol || 'None';
     scanTimeDisplay.textContent = `${target.executionTimeMs} ms`;
 
-    // 2. Score Gauge & Grade
-    animateScoreMeter(evaluation.score);
+    // 2. Score & Grade
+    animateScoreDisplay(evaluation.score);
     renderGradeBadge(evaluation.grade);
 
-    // 3. Severity stats
-    critCountEl.textContent = `${evaluation.stats.critical} Critical`;
-    highCountEl.textContent = `${evaluation.stats.high} High`;
-    medCountEl.textContent = `${evaluation.stats.medium} Medium`;
-    lowCountEl.textContent = `${evaluation.stats.low} Low`;
-    passCountEl.textContent = `${evaluation.stats.passed} Passed`;
+    // 3. Severity Distribution
+    critCountEl.textContent = `${evaluation.stats.critical} CRIT`;
+    highCountEl.textContent = `${evaluation.stats.high} HIGH`;
+    medCountEl.textContent = `${evaluation.stats.medium} MED`;
+    lowCountEl.textContent = `${evaluation.stats.low} LOW`;
+    passCountEl.textContent = `${evaluation.stats.passed} PASS`;
 
-    // 4. Diagnostic Technical Drawer
-    renderTechnicalDiagnostics(rawScanData);
+    // 4. Diagnostic Sidebar
+    renderDiagnosticsSidebar(rawScanData);
 
-    // 5. Findings List
+    // 5. Findings
     renderFindings();
   }
 
-  // Gauge Meter Animation
-  function animateScoreMeter(score) {
-    const circumference = 440; // 2 * pi * r (r=70)
+  function animateScoreDisplay(score) {
     meterScoreNum.textContent = '0';
+    let barColor = 'var(--cyan)';
+    if (score >= 85) barColor = 'var(--green)';
+    else if (score >= 70) barColor = 'var(--cyan)';
+    else if (score >= 50) barColor = 'var(--amber)';
+    else if (score >= 35) barColor = 'var(--orange)';
+    else barColor = 'var(--red)';
 
-    let strokeColor = 'var(--cyan)';
-    if (score >= 85) strokeColor = 'var(--green)';
-    else if (score >= 70) strokeColor = 'var(--cyan)';
-    else if (score >= 50) strokeColor = 'var(--yellow)';
-    else if (score >= 35) strokeColor = 'var(--orange)';
-    else strokeColor = 'var(--red)';
+    hudScoreBar.style.background = barColor;
+    hudScoreBar.style.width = `${score}%`;
 
-    meterFill.style.stroke = strokeColor;
-
-    const offset = circumference - (score / 100) * circumference;
-    meterFill.style.strokeDashoffset = offset;
-
-    // Count up animation
     let current = 0;
-    const duration = 1200;
+    const duration = 900;
     const increment = Math.ceil(score / (duration / 25)) || 1;
     const counterInterval = setInterval(() => {
       current += increment;
@@ -283,10 +292,9 @@ Dianalisis menggunakan CyberTrack Passive Security Scanner.`;
     }, 25);
   }
 
-  // Grade Badge
   function renderGradeBadge(grade) {
-    gradeBadge.textContent = `Grade ${grade}`;
-    gradeBadge.className = 'grade-badge';
+    gradeBadge.textContent = `GRADE ${grade}`;
+    gradeBadge.className = 'grade-stamp';
     if (grade === 'A+' || grade === 'A') gradeBadge.classList.add('grade-A');
     else if (grade === 'B') gradeBadge.classList.add('grade-B');
     else if (grade === 'C') gradeBadge.classList.add('grade-C');
@@ -294,39 +302,47 @@ Dianalisis menggunakan CyberTrack Passive Security Scanner.`;
     else gradeBadge.classList.add('grade-F');
   }
 
-  // Diagnostic Technical Drawer Values
-  function renderTechnicalDiagnostics(raw) {
+  function renderDiagnosticsSidebar(raw) {
     const tls = raw.tls;
     if (tls.supported) {
       sslCertIssuer.textContent = tls.issuer;
-      sslCertValidity.textContent = `${new Date(tls.validFrom).toLocaleDateString()} s/d ${new Date(tls.validTo).toLocaleDateString()}`;
-      sslCertDays.textContent = tls.isExpired ? 'Kedaluwarsa!' : `${tls.daysRemaining} hari`;
+      sslCertValidity.textContent = `${new Date(tls.validFrom).toLocaleDateString()} - ${new Date(tls.validTo).toLocaleDateString()}`;
+      sslCertDays.textContent = tls.isExpired ? 'EXPIRED' : `${tls.daysRemaining} days`;
       sslCipherSuite.textContent = `${tls.protocol} (${tls.cipher})`;
     } else {
-      sslCertIssuer.textContent = 'Tidak Ada SSL/TLS';
+      sslCertIssuer.textContent = 'NO TLS / PORT 443 CLOSED';
       sslCertValidity.textContent = 'N/A';
       sslCertDays.textContent = 'N/A';
       sslCipherSuite.textContent = 'N/A';
     }
 
     // DNS & SPF/DMARC
-    dnsSpfVal.textContent = raw.dns.spf.present ? raw.dns.spf.status : 'Tidak Ditemukan';
-    dnsDmarcVal.textContent = raw.dns.dmarc.present ? `p=${raw.dns.dmarc.policy}` : 'Tidak Ditemukan';
+    if (raw.dns.spf.present) {
+      dnsSpfVal.textContent = `${raw.dns.spf.status} (${raw.dns.spf.checkedDomain})`;
+    } else {
+      dnsSpfVal.textContent = 'NOT CONFIGURED';
+    }
+
+    if (raw.dns.dmarc.present) {
+      dnsDmarcVal.textContent = `p=${raw.dns.dmarc.policy} (${raw.dns.dmarc.checkedDomain})`;
+    } else {
+      dnsDmarcVal.textContent = 'NOT CONFIGURED';
+    }
 
     // HTTP Redirect
     if (raw.redirect.httpAvailable) {
-      httpRedirectVal.textContent = raw.redirect.redirectsToHttps ? `Otomatis (Status ${raw.redirect.statusCode})` : 'Tidak Redirect';
+      httpRedirectVal.textContent = raw.redirect.redirectsToHttps ? `301 ENFORCED` : `NO REDIRECT (INSECURE)`;
     } else {
-      httpRedirectVal.textContent = 'Port 80 Tertutup';
+      httpRedirectVal.textContent = 'PORT 80 REFUSED';
     }
 
     // Server Leak
-    const srv = raw.headers['server'] || 'Disembunyikan (Bagus)';
+    const srv = raw.headers['server'] || 'SUPPRESSED (SECURE)';
     const pow = raw.headers['x-powered-by'] ? ` / Powered: ${raw.headers['x-powered-by']}` : '';
     serverHeaderVal.textContent = srv + pow;
   }
 
-  // Findings List Rendering
+  // Findings List
   function renderFindings() {
     if (!currentScanData) return;
     const { findings } = currentScanData.evaluation;
@@ -350,100 +366,94 @@ Dianalisis menggunakan CyberTrack Passive Security Scanner.`;
 
     if (filtered.length === 0) {
       findingsContainer.innerHTML = `
-        <div style="text-align: center; padding: 3rem; background: var(--bg-card); border-radius: var(--radius-lg); border: 1px dashed var(--border-subtle); color: var(--text-dim);">
-          <svg style="width: 48px; height: 48px; fill: var(--green); margin-bottom: 0.5rem;" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
-          <p style="font-weight: 700; font-size: 1.1rem; color: var(--text-main);">Tidak ada temuan yang cocok dengan filter ini</p>
-          <p style="font-size: 0.9rem;">Semua kriteria pada kategori ini dalam kondisi prima atau filter disetel terlalu ketat.</p>
+        <div style="padding: 2.5rem; text-align: center; background: var(--bg-surface); border: 1px dashed var(--border-hairline); border-radius: var(--radius-sm); color: var(--text-tertiary); font-family: var(--font-mono); font-size: 0.85rem;">
+          [NO AUDIT FINDINGS MATCH CURRENT FILTER CRITERIA]
         </div>
       `;
       return;
     }
 
-    filtered.forEach((finding) => {
-      const card = createFindingCard(finding);
+    filtered.forEach((f) => {
+      const card = createFindingRow(f);
       findingsContainer.appendChild(card);
     });
   }
 
-  function createFindingCard(f) {
-    const card = document.createElement('div');
-    card.className = `finding-card status-${f.severity.toLowerCase()}`;
+  function createFindingRow(f) {
+    const row = document.createElement('div');
+    row.className = `finding-row sev-${f.severity.toLowerCase()}`;
 
-    // Severity status badge styling
-    let sevBadgeColor = 'var(--text-muted)';
-    let sevBadgeBg = 'rgba(255, 255, 255, 0.05)';
-    if (f.severity === 'CRITICAL') { sevBadgeColor = 'var(--red)'; sevBadgeBg = 'var(--red-dim)'; }
-    else if (f.severity === 'HIGH') { sevBadgeColor = 'var(--orange)'; sevBadgeBg = 'var(--orange-dim)'; }
-    else if (f.severity === 'MEDIUM') { sevBadgeColor = 'var(--yellow)'; sevBadgeBg = 'var(--yellow-dim)'; }
-    else if (f.severity === 'LOW') { sevBadgeColor = 'var(--cyan)'; sevBadgeBg = 'var(--cyan-dim)'; }
-    else if (f.severity === 'PASS') { sevBadgeColor = 'var(--green)'; sevBadgeBg = 'var(--green-dim)'; }
+    let sevColor = 'var(--text-tertiary)';
+    if (f.severity === 'CRITICAL') sevColor = 'var(--red)';
+    else if (f.severity === 'HIGH') sevColor = 'var(--orange)';
+    else if (f.severity === 'MEDIUM') sevColor = 'var(--amber)';
+    else if (f.severity === 'LOW') sevColor = 'var(--cyan)';
+    else if (f.severity === 'PASS') sevColor = 'var(--green)';
 
     let snippetsHtml = '';
     if (f.snippets && Object.keys(f.snippets).length > 0) {
       const firstKey = Object.keys(f.snippets)[0];
-      const snippetContent = escapeHtml(f.snippets[firstKey]);
+      const code = escapeHtml(f.snippets[firstKey]);
       snippetsHtml = `
-        <div class="snippet-box">
-          <div class="snippet-top">
-            <span>Contoh Konfigurasi Solusi (${firstKey.toUpperCase()})</span>
-            <button type="button" class="btn-copy-snippet" data-code="${encodeURIComponent(f.snippets[firstKey])}">
-              <svg style="width: 13px; height: 13px;" viewBox="0 0 24 24"><path fill="currentColor" d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>
-              Salin Konfigurasi
+        <div class="code-box">
+          <div class="code-box-header">
+            <span>CONFIG PLAYBOOK // ${firstKey.toUpperCase()}</span>
+            <button type="button" class="btn-copy-code" data-code="${encodeURIComponent(f.snippets[firstKey])}">
+              <svg style="width: 12px; height: 12px;" viewBox="0 0 24 24"><path fill="currentColor" d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>
+              COPY
             </button>
           </div>
-          <div class="snippet-code">${snippetContent}</div>
+          <pre>${code}</pre>
         </div>
       `;
     }
 
-    card.innerHTML = `
-      <div class="finding-header">
-        <div class="finding-title-group">
-          <span class="badge-tag" style="background: ${sevBadgeBg}; color: ${sevBadgeColor}; border: 1px solid ${sevBadgeColor}40;">
-            ${f.severity}
-          </span>
-          <span class="badge-tag badge-category">${f.category}</span>
-          ${f.owasp ? `<span class="badge-tag badge-owasp">${f.owasp}</span>` : ''}
-          <h3 class="finding-title">${f.title}</h3>
-        </div>
-        ${f.penalty > 0 ? `<span style="font-size: 0.8rem; font-weight: 700; color: var(--red); font-family: var(--font-mono);">-${f.penalty} Poin</span>` : ''}
+    row.innerHTML = `
+      <div class="finding-meta-top">
+        <span class="badge-tag" style="background: ${sevColor}15; color: ${sevColor}; border: 1px solid ${sevColor}40;">
+          [${f.severity}]
+        </span>
+        <span class="badge-tag badge-cat">${f.category}</span>
+        ${f.owasp ? `<span class="badge-tag badge-owasp">${f.owasp}</span>` : ''}
+        ${f.penalty > 0 ? `<span class="penalty-tag">-${f.penalty} PTS</span>` : ''}
       </div>
 
-      <p class="finding-desc">${f.details}</p>
+      <div class="finding-title">${f.title}</div>
+      <div class="finding-desc">${f.details}</div>
 
       ${!f.passed ? `
-        <div class="finding-remediation-box">
-          <div class="remediation-header">
-            <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg>
-            <span>Rekomendasi Perbaikan:</span>
+        <div class="remediation-panel">
+          <div class="remediation-label">
+            <svg style="width: 12px; height: 12px;" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg>
+            <span>REMEDIATION PROTOCOL:</span>
           </div>
-          <p class="remediation-text">${f.recommendation}</p>
+          <div class="remediation-text">${f.recommendation}</div>
           ${snippetsHtml}
         </div>
       ` : `
-        <div style="font-size: 0.85rem; color: var(--green); display: flex; align-items: center; gap: 0.4rem;">
-          <svg style="width: 16px; height: 16px; fill: currentColor;" viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
-          ${f.recommendation}
+        <div class="passed-line">
+          <svg viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+          <span>${f.recommendation}</span>
         </div>
       `}
     `;
 
     // Bind snippet copy buttons
-    const copyBtns = card.querySelectorAll('.btn-copy-snippet');
+    const copyBtns = row.querySelectorAll('.btn-copy-code');
     copyBtns.forEach((btn) => {
-      btn.addEventListener('click', (e) => {
+      btn.addEventListener('click', () => {
         const rawCode = decodeURIComponent(btn.getAttribute('data-code'));
         navigator.clipboard.writeText(rawCode).then(() => {
-          showToast('Kode konfigurasi berhasil disalin!');
+          showToast('Config snippet copied');
         });
       });
     });
 
-    return card;
+    return row;
   }
 
   // ==========================================
-  // Local History Management
+  // Local History
   // ==========================================
   function saveToHistory(scanData) {
     const item = {
@@ -454,7 +464,6 @@ Dianalisis menggunakan CyberTrack Passive Security Scanner.`;
     };
 
     let history = JSON.parse(localStorage.getItem('cybertrack_history') || '[]');
-    // Filter duplicates
     history = history.filter((h) => h.hostname !== item.hostname);
     history.unshift(item);
     if (history.length > 8) history.pop();
@@ -469,7 +478,7 @@ Dianalisis menggunakan CyberTrack Passive Security Scanner.`;
     historyChipsContainer.innerHTML = '';
 
     if (history.length === 0) {
-      historyChipsContainer.innerHTML = `<span style="font-size: 0.82rem; color: var(--text-dim);">Belum ada riwayat pemindaian sebelumnya.</span>`;
+      historyChipsContainer.innerHTML = `<span style="font-size: 0.75rem; color: var(--text-dimmed); font-family: var(--font-mono);">No audit history</span>`;
       return;
     }
 
@@ -478,7 +487,7 @@ Dianalisis menggunakan CyberTrack Passive Security Scanner.`;
       chip.className = 'history-item';
       chip.innerHTML = `
         <span>${h.hostname}</span>
-        <span class="history-grade-tag grade-${h.grade.replace('+', '-plus')}">${h.grade} (${h.score})</span>
+        <span class="history-grade grade-${h.grade.replace('+', '-plus')}">[${h.grade}]</span>
       `;
       chip.addEventListener('click', () => {
         targetInput.value = h.hostname;
@@ -489,7 +498,7 @@ Dianalisis menggunakan CyberTrack Passive Security Scanner.`;
   }
 
   // ==========================================
-  // Helper Utilities
+  // Helpers
   // ==========================================
   function showError(msg) {
     errorMessage.textContent = msg;
@@ -507,7 +516,7 @@ Dianalisis menggunakan CyberTrack Passive Security Scanner.`;
     toastMsg.classList.add('show');
     setTimeout(() => {
       toastMsg.classList.remove('show');
-    }, 3000);
+    }, 2800);
   }
 
   function escapeHtml(text) {
