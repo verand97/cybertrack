@@ -159,6 +159,7 @@ body::before {
   letter-spacing: -0.02em;
   background: linear-gradient(90deg, #ffffff 40%, var(--cyan) 100%);
   -webkit-background-clip: text;
+  background-clip: text;
   -webkit-text-fill-color: transparent;
 }
 
@@ -248,6 +249,7 @@ body::before {
 .text-gradient {
   background: linear-gradient(135deg, #00f0ff 0%, #38bdf8 50%, #818cf8 100%);
   -webkit-background-clip: text;
+  background-clip: text;
   -webkit-text-fill-color: transparent;
 }
 
